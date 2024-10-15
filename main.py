@@ -21,7 +21,7 @@ PORT = int(os.getenv("PORT", 5050))
 SYSTEM_MESSAGE = (
     "You are a helpful and bubbly AI assistant who loves to chat about "
     "anything the user is interested in and is prepared to offer them facts. "
-    "Always stay positive, but work in a joke when appropriate."
+    "Always stay positive, keep answers short and consice."
 )
 VOICE = "alloy"
 LOG_EVENT_TYPES = [
@@ -60,9 +60,7 @@ async def handle_incoming_call(request: Request):
     """Handle incoming call and return TwiML response."""
     response = VoiceResponse()
     response.say(
-        "Welcome to Forward Flow. Is there something I can help you with?")
-    response.pause(length=1)
-    response.say("You can say anything")
+        "Welcome to Bots one's voice bot. Is there something I can help you with?")
     host = request.url.hostname
     connect = Connect()
     connect.stream(url=f"wss://{host}/media-stream")
@@ -100,10 +98,6 @@ async def handle_media_stream(websocket: WebSocket):
                         stream_sid = data['start']['streamSid']
                         log_info(f"Incoming stream started: {
                                  stream_sid}", "Stream")
-                    elif data['event'] == 'transcription' and openai_ws.open:
-                        transcription = data['transcription']['text']
-                        log_conversation("Human", transcription, Fore.GREEN)
-                        await openai_ws.send(json.dumps({"type": "input_text.append", "text": transcription}))
             except WebSocketDisconnect:
                 log_info("Client disconnected", "Connection")
                 if openai_ws.open:
@@ -111,17 +105,10 @@ async def handle_media_stream(websocket: WebSocket):
 
         async def send_to_twilio():
             nonlocal stream_sid
-            accumulated_response = ""
             try:
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
-                    if response['type'] == 'response.content.delta':
-                        accumulated_response += response.get('delta', '')
-                    elif response['type'] == 'response.content.done':
-                        log_conversation(
-                            "AI", accumulated_response, Fore.MAGENTA)
-                        accumulated_response = ""
-                    elif response['type'] == 'response.audio.delta' and response.get('delta'):
+                    if response['type'] == 'response.audio.delta' and response.get('delta'):
                         try:
                             audio_payload = base64.b64encode(
                                 base64.b64decode(response['delta'])).decode('utf-8')
@@ -136,6 +123,12 @@ async def handle_media_stream(websocket: WebSocket):
                         except Exception as e:
                             log_info(f"Error processing audio data: {
                                      e}", "Error")
+                    elif response['type'] == 'conversation.item.input_audio_transcription.completed':
+                        log_conversation(
+                            "HUMAN", response.get('transcript', ''), Fore.MAGENTA)
+                    elif response['type'] == 'response.audio_transcript.done':
+                        log_conversation(
+                            "AI", response.get('transcript', ''), Fore.MAGENTA)
             except Exception as e:
                 log_info(f"Error in send_to_twilio: {e}", "Error")
 
@@ -149,6 +142,9 @@ async def send_session_update(openai_ws):
             "turn_detection": {"type": "server_vad"},
             "input_audio_format": "g711_ulaw",
             "output_audio_format": "g711_ulaw",
+            "input_audio_transcription": {
+                "model": "whisper-1",
+            },
             "voice": VOICE,
             "instructions": SYSTEM_MESSAGE,
             "modalities": ["text", "audio"],
