@@ -50,6 +50,40 @@ def log_info(message, event_type=None):
         print(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} {message}")
 
 
+processed_responses = set()
+
+
+async def handle_openai_message(response, websocket, stream_sid):
+    global processed_responses
+
+    response_id = response.get('id', '')
+    if response_id in processed_responses:
+        return
+
+    if response['type'] == 'response.audio.delta' and response.get('delta'):
+        try:
+            audio_payload = base64.b64encode(
+                base64.b64decode(response['delta'])).decode('utf-8')
+            audio_delta = {
+                "event": "media",
+                "streamSid": stream_sid,
+                "media": {
+                    "payload": audio_payload
+                }
+            }
+            await websocket.send_json(audio_delta)
+        except Exception as e:
+            log_info(f"Error processing audio data: {e}", "Error")
+    elif response['type'] == 'conversation.item.input_audio_transcription.completed':
+        log_conversation("HUMAN", response.get('transcript', ''), Fore.MAGENTA)
+    elif response['type'] == 'response.audio_transcript.done':
+        log_conversation("AI", response.get('transcript', ''), Fore.MAGENTA)
+    elif response['type'] in LOG_EVENT_TYPES:
+        log_info(f"Received event: {response['type']}")
+
+    processed_responses.add(response_id)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index_page():
     return {"message": "Twilio Media Stream Server is running!"}
@@ -108,6 +142,7 @@ async def handle_media_stream(websocket: WebSocket):
             try:
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
+                    await handle_openai_message(response, websocket, stream_sid)
                     if response['type'] == 'response.audio.delta' and response.get('delta'):
                         try:
                             audio_payload = base64.b64encode(
@@ -124,14 +159,19 @@ async def handle_media_stream(websocket: WebSocket):
                             log_info(f"Error processing audio data: {
                                      e}", "Error")
                     elif response['type'] == 'conversation.item.input_audio_transcription.completed':
-                        log_conversation(
-                            "HUMAN", response.get('transcript', ''), Fore.MAGENTA)
+                        log_conversation("HUMAN", response.get(
+                            'transcript', ''), Fore.MAGENTA)
+                        await signal_listening_state(openai_ws)
                     elif response['type'] == 'response.audio_transcript.done':
-                        log_conversation(
-                            "AI", response.get('transcript', ''), Fore.MAGENTA)
+                        await signal_listening_state(openai_ws)
+                        log_conversation("AI", response.get(
+                            'transcript', ''), Fore.MAGENTA)
             except Exception as e:
                 log_info(f"Error in send_to_twilio: {e}", "Error")
 
+        async def signal_listening_state(openai_ws):
+            await openai_ws.send(json.dumps({"type": "input_audio_buffer.speech_stopped"}))
+            await openai_ws.send(json.dumps({"type": "input_audio_buffer.speech_started"}))
         await asyncio.gather(receive_from_twilio(), send_to_twilio())
 
 
@@ -139,7 +179,9 @@ async def send_session_update(openai_ws):
     session_update = {
         "type": "session.update",
         "session": {
-            "turn_detection": {"type": "server_vad"},
+            "turn_detection": {
+                "type": "server_vad",
+            },
             "input_audio_format": "g711_ulaw",
             "output_audio_format": "g711_ulaw",
             "input_audio_transcription": {
